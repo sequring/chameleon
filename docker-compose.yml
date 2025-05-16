@@ -1,0 +1,23 @@
+services:
+  chameleon_proxy:
+    build:
+      context: . 
+      dockerfile: Dockerfile
+    container_name: chameleon_proxy_server
+    restart: unless-stopped
+    ports:
+      - "1080:1080" 
+      - "8081:8081" 
+    volumes:
+      - ./config.yml:/app/config.yml:ro 
+      - ./proxies.json:/app/proxies.json:rw 
+      - ./users.json:/app/users.json:rw
+      - ./logs:/app/logs 
+    environment:
+      - TZ=Europe/Berlin
+    networks:
+      - chameleon_net
+
+networks:
+  chameleon_net:
+    driver: bridge

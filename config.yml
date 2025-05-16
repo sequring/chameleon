@@ -1,0 +1,113 @@
+# Chameleon Application Configuration - Example
+# Copy this file to config.yml and customize it for your setup.
+
+# =====================================
+# Server Configuration
+# =====================================
+server:
+  # Port for the SOCKS5 proxy server to listen on
+  # Example: ":1080"
+  socks_port: ":1080"
+
+  # Port for the administrative HTTP server
+  # Exposes:
+  #   - /metrics (for Prometheus)
+  #   - /reload-proxies (API for reloading proxies.json)
+  #   - /reload-users (API for reloading users.json)
+  # Example: ":8081"
+  admin_port: ":8081"
+
+# =====================================
+# Logging Configuration
+# =====================================
+logging:
+  # Directory where log files will be created
+  directory: "logs"
+
+  # Filename for SOCKS5 access logs
+  access_log_file: "access.log"
+
+  # Filename for application error and informational logs
+  error_log_file: "error.log"
+
+  # --- Log rotation parameters (via lumberjack) ---
+  # Maximum size in megabytes of a log file before it gets rotated
+  log_max_size_mb: 100
+
+  # Maximum number of old log files to retain
+  log_max_backups: 3
+
+  # Maximum number of days to retain old log files
+  log_max_age_days: 28
+
+  # Whether to compress rotated log files (true/false)
+  log_compress: true
+
+# =====================================
+# Upstream Proxies Pool Configuration
+# =====================================
+proxies:
+  # Path to the JSON file containing the list of upstream SOCKS5 proxies
+  # Example: "proxies.json"
+  config_file_path: "proxies.json"
+
+  # Interval in seconds between health checks for each upstream proxy
+  check_interval_seconds: 60
+
+  # Timeout in seconds for a single health check (including TLS handshake)
+  check_timeout_seconds: 10
+
+  # Target host and port for health checks (should be a reliable HTTPS endpoint)
+  # Example: "www.google.com:443" or "cloudflare.com:443"
+  health_check_target: "www.google.com:443"
+
+# =====================================
+# SOCKS5 User Configuration
+# =====================================
+users:
+  # Path to the JSON file containing the list of SOCKS5 users
+  # Example: "users.json"
+  config_file_path: "users.json"
+
+  # Default behavior when a user has no 'allowed_proxy_tags' specified:
+  # "deny": Deny access to any upstream proxy.
+  # "allow_default_tag_only": Allow access only to proxies tagged with 'default_proxy_tag'.
+  # "allow_all_active": Allow access to any active upstream proxy (tags are ignored for this user).
+  default_behavior_no_tags: "allow_default_tag_only"
+
+  # The specific tag to use when 'default_behavior_no_tags' is "allow_default_tag_only".
+  # This tag must exist on some of your upstream proxies.
+  # Example: "general"
+  default_proxy_tag: "general"
+
+# =====================================
+# Webhook Notifications (Optional)
+# =====================================
+webhook:
+  # URL to POST notifications to if all upstream proxies go down or recover.
+  # Leave empty to disable webhook notifications.
+  # Example: "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK_URL"
+  url: ""
+
+  # Timeout in seconds for sending a webhook notification
+  post_timeout_seconds: 10
+
+# =====================================
+# Admin API Security
+# =====================================
+# Secret token required in the X-Reload-Token header for API reload endpoints.
+# !!! IMPORTANT: CHANGE THIS TO A STRONG, UNIQUE, AND SECRET TOKEN !!!
+admin_api_reload_token: "changeme_to_a_strong_secret_token"
+
+# =====================================
+# Debugging
+# =====================================
+# Interval in seconds for printing debug proxy status to the console.
+# Set to 0 to disable (recommended for production if Prometheus is used).
+console_metrics_interval_seconds: 30
+
+# =====================================
+# Shutdown Behavior
+# =====================================
+# Timeout in seconds for services to shut down gracefully.
+graceful_shutdown_timeout_seconds: 15

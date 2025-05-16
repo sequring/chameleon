@@ -19,6 +19,24 @@
 go.work
 go.work.sum
 
+# binary, build directory
+bin/
+chameleon
+chameleon-server
+# build directory
+build/
+# coverage output
+coverage.out
+# test output
+*.test
+# test output
+*.out
+# test output
+*.cover
+# test output
+*.cov
+
+
 # env file
 .env
 
@@ -54,5 +72,6 @@ proxies.json
 Thumbs.db
 # Log files
 *.log
+logs/*
 # Temporary files
 *.tmp
