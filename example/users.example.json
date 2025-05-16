@@ -1,0 +1,37 @@
+[
+  {
+    "username": "standard_user",
+    "password": "some_strong_password_1",
+    "allowed": true,
+    "allowed_proxy_tags": [
+      "general"
+    ]
+  },
+  {
+    "username": "streaming_user",
+    "password": "some_strong_password_2",
+    "allowed": true,
+    "allowed_proxy_tags": [
+      "streaming",
+      "fast"
+    ]
+  },
+  {
+    "username": "developer_user",
+    "password": "dev_password_!@#",
+    "allowed": true
+  },
+  {
+    "username": "usa_access_user",
+    "password": "us_access_pass",
+    "allowed": true,
+    "allowed_proxy_tags": [
+      "usa"
+    ]
+  },
+  {
+    "username": "disabled_user",
+    "password": "any_password",
+    "allowed": false
+  }
+]

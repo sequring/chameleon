@@ -1,0 +1,35 @@
+[
+  {
+    "address": "your_proxy_ip_1:port",
+    "username": "proxy_user1",
+    "password": "proxy_password1",
+    "tags": [
+      "usa",
+      "fast",
+      "general"
+    ]
+  },
+  {
+    "address": "another_proxy_ip_2:port",
+    "tags": [
+      "europe",
+      "stable",
+      "general",
+      "streaming"
+    ]
+  },
+  {
+    "address": "127.0.0.1:9050",
+    "tags": [
+      "tor",
+      "privacy_focused"
+    ]
+  },
+  {
+    "address": "yet_another_proxy.com:10800",
+    "tags": [
+      "asia",
+      "low-latency"
+    ]
+  }
+]
