@@ -1,3 +1,4 @@
+// proxypool/checker.go
 package proxypool
 
 import (
@@ -6,69 +7,77 @@ import (
 	"log"
 	"net"
 	"strings"
-	"sync"
+	// "sync" // Больше не нужен здесь, если checkAllProxies удален или пуст
 	"time"
 
 	px "golang.org/x/net/proxy"
 )
 
+// checkAllProxies - этот метод в текущей архитектуре с healthCheckLoopForProxy
+// практически не нужен для регулярных проверок. Первоначальные запуски проверок
+// происходят при создании ProxyConfig в reloadAndReconcileProxies.
+// Оставляем его пустым или удаляем. Если оставить, то он должен быть методом Pool.
+/*
 func (p *Pool) checkAllProxies() {
-	p.mu.RLock()
-	proxiesToCheck := make([]*ProxyConfig, len(p.proxies))
-	copy(proxiesToCheck, p.proxies)
-	p.mu.RUnlock()
-
-	log.Printf("Starting health check for %d proxies...", len(proxiesToCheck))
-	var checkWg sync.WaitGroup
-	for _, proxyCfg := range proxiesToCheck {
-		checkWg.Add(1)
-		p.wg.Add(1) 
-		go func(pc *ProxyConfig) {
-			defer checkWg.Done()
-			defer p.wg.Done() 
-			p.checkProxy(p.shutdownCtx, pc) 
-		}(proxyCfg)
-	}
-	checkWg.Wait()
-	log.Println("Health check for all proxies finished.")
+	// Логика здесь была бы для принудительного запуска раунда проверок
+	// для всех существующих горутин healthCheckLoopForProxy.
+	// Это потребовало бы дополнительной синхронизации (например, каналов).
+	// В текущей реализации он не используется активно.
+	log.Println("ProxyPool: checkAllProxies called (currently a no-op in this architecture).")
 }
+*/
 
-func (p *Pool) checkProxy(ctx context.Context, proxyCfg *ProxyConfig) {
+// checkProxy выполняет одну проверку работоспособности для указанного ProxyConfig.
+// Этот метод вызывается из healthCheckLoopForProxy.
+// `ctx` - это контекст горутины healthCheckLoopForProxy, который может быть отменен.
+func (p *Pool) checkProxy(ctx context.Context, proxyCfg *ProxyConfig) { // Ресивер p *Pool
 	start := time.Now()
-	checkCtx, cancel := context.WithTimeout(ctx, p.timeout)
+	checkCtx, cancel := context.WithTimeout(ctx, p.timeout) // Используем p.timeout
 	defer cancel()
 
 	var auth *px.Auth
-	if proxyCfg.Username != "" {
-		auth = &px.Auth{User: proxyCfg.Username, Password: proxyCfg.Password}
+	proxyCfg.Mu.RLock()
+	addrToCheck := proxyCfg.Address // Копируем, чтобы не держать мьютекс на время диала
+	username := proxyCfg.Username
+	password := proxyCfg.Password
+	proxyCfg.Mu.RUnlock()
+
+	if username != "" {
+		auth = &px.Auth{User: username, Password: password}
 	}
 
-	dialer, err := px.SOCKS5("tcp", proxyCfg.Address, auth, px.Direct)
+	dialer, err := px.SOCKS5("tcp", addrToCheck, auth, px.Direct)
 	if err != nil {
-		log.Printf("Proxy %s: failed to create SOCKS5 dialer: %v", proxyCfg.Address, err)
+		log.Printf("Proxy %s: failed to create SOCKS5 dialer: %v", addrToCheck, err)
 		proxyCfg.MarkInactive(err)
 		return
 	}
 
-	targetHost := p.testURL
+	targetHost := p.testURL // Используем p.testURL
 	hostNameForTLS := targetHost
 	if strings.Contains(targetHost, ":") {
-		hostNameForTLS, _, err = net.SplitHostPort(targetHost)
+		var port string
+		hostNameForTLS, port, err = net.SplitHostPort(targetHost)
 		if err != nil {
-			log.Printf("Proxy %s: invalid testURL format '%s' for SplitHostPort: %v", proxyCfg.Address, targetHost, err)
+			log.Printf("Proxy %s: invalid testURL format '%s' for SplitHostPort: %v", addrToCheck, targetHost, err)
 			proxyCfg.MarkInactive(err)
 			return
 		}
+		if port == "" { // Если SplitHostPort вернул хост, но порт был ожидаем (например, из-за ошибки в testURL)
+			 // это может быть проблемой, если targetHost для dialContext должен содержать порт
+			log.Printf("Warning: Proxy %s: port not found in testURL '%s' after SplitHostPort, using original targetHost for dialing.", addrToCheck, targetHost)
+		}
+
 	}
 
-	conn, err := DialContext(checkCtx, dialer, "tcp", targetHost)
+	conn, err := DialContext(checkCtx, dialer, "tcp", targetHost) // DialContext из common.go
 
 	if err != nil {
 		select {
 		case <-checkCtx.Done():
-			log.Printf("Proxy %s check timed out or cancelled: %v (underlying error: %v)", proxyCfg.Address, checkCtx.Err(), err)
+			log.Printf("Proxy %s check for '%s' timed out or cancelled: %v (underlying dial error: %v)", addrToCheck, targetHost, checkCtx.Err(), err)
 		default:
-			log.Printf("Proxy %s: failed to dial test URL '%s': %v", proxyCfg.Address, targetHost, err)
+			log.Printf("Proxy %s: failed to dial test URL '%s': %v", addrToCheck, targetHost, err)
 		}
 		proxyCfg.MarkInactive(err)
 		return
@@ -81,20 +90,23 @@ func (p *Pool) checkProxy(ctx context.Context, proxyCfg *ProxyConfig) {
 	})
 
 	if dl, ok := checkCtx.Deadline(); ok {
-		tlsConn.SetDeadline(dl)
+		if err := conn.SetDeadline(dl); err != nil {
+			log.Printf("Proxy %s: failed to set deadline for TLS handshake: %v", addrToCheck, err)
+		}
 	}
 
 	if err := tlsConn.HandshakeContext(checkCtx); err != nil {
 		select {
 		case <-checkCtx.Done():
-			log.Printf("Proxy %s: TLS handshake to '%s' timed out or cancelled: %v (underlying error: %v)", proxyCfg.Address, targetHost, checkCtx.Err(), err)
+			log.Printf("Proxy %s: TLS handshake to '%s' (SNI: %s) timed out or cancelled: %v (underlying handshake error: %v)", addrToCheck, targetHost, hostNameForTLS, checkCtx.Err(), err)
 		default:
-			log.Printf("Proxy %s: TLS handshake to '%s' failed: %v", proxyCfg.Address, targetHost, err)
+			log.Printf("Proxy %s: TLS handshake to '%s' (SNI: %s) failed: %v", addrToCheck, targetHost, hostNameForTLS, err)
 		}
 		proxyCfg.MarkInactive(err)
 		return
 	}
 
-	proxyCfg.MarkActive(time.Since(start))
-	log.Printf("Proxy %s is active, response time: %v", proxyCfg.Address, proxyCfg.ResponseTime)
+	responseTime := time.Since(start)
+	proxyCfg.MarkActive(responseTime)
+	log.Printf("Proxy %s is active, response time: %v", addrToCheck, responseTime)
 }

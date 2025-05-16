@@ -20,7 +20,9 @@ type ProxyEntry struct {
 
 type App struct { 
 	ServerPort         string         `json:"server_port"`
-	Proxies            []ProxyEntry   `json:"proxies"`
+	ProxiesFilePath      string         `json:"proxies_file_path"`      
+	ProxyReloadToken     string         `json:"proxy_reload_token"`     
+	ProxyReloadListenAddr string		 `json:"proxy_reload_listen_addr,omitempty"`
 	ProxyCheckInterval string         `json:"proxy_check_interval"`
 	ProxyCheckTimeout  string         `json:"proxy_check_timeout"`
 	HealthCheckTarget  string         `json:"health_check_target"`
@@ -36,9 +38,7 @@ var (
 	DefaultServerPortStr         = ":1080"
 	DefaultHealthCheckTargetStr  = "www.google.com:443"
 	DefaultPrometheusListenAddr = ":9091"
-)
-
-var (
+	DefaultProxiesFilePath  = "proxies.json"
 	DefaultProxyCheckInterval time.Duration
 	DefaultProxyCheckTimeout  time.Duration
 	MetricsDisplayInterval    time.Duration 
@@ -74,6 +74,12 @@ func Load(path string) (*App, error) {
 	}
 		if appCfg.PrometheusListenAddr == "" {
 		appCfg.PrometheusListenAddr = DefaultPrometheusListenAddr
+	}
+	if appCfg.ProxiesFilePath == "" {
+		appCfg.ProxiesFilePath = DefaultProxiesFilePath
+	}
+	if appCfg.ProxyReloadToken == "" {
+		log.Println("Warning: proxy_reload_token is not set. Reload endpoint will be insecure or disabled.")
 	}
 
 	if len(appCfg.Users) == 0 {

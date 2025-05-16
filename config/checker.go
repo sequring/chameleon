@@ -4,7 +4,6 @@ package config
 import (
 	"fmt"
 	"net"
-	"net/url"
 	"time"
 )
 
@@ -43,7 +42,7 @@ func (appCfg *App) Validate() []error {
 		}
 	}
 
-		if appCfg.PrometheusListenAddr != "" {
+	if appCfg.PrometheusListenAddr != "" {
 		_, _, err := net.SplitHostPort(appCfg.PrometheusListenAddr)
 		isJustPort := false
 		if err != nil {
@@ -53,34 +52,33 @@ func (appCfg *App) Validate() []error {
 					isJustPort = true
 				}
 			}
-		}
-		if err != nil && !isJustPort {
+	}
+	if err != nil && !isJustPort {
 			errs = append(errs, fmt.Errorf("invalid prometheus_listen_addr format '%s': %w. Expected host:port or :port", appCfg.PrometheusListenAddr, err))
 		}
 	}
 
+if appCfg.ProxiesFilePath == "" {
+		errs = append(errs, fmt.Errorf("proxies_file_path must be set"))
+	}
 
-	if len(appCfg.Proxies) == 0 {
-		errs = append(errs, fmt.Errorf("at least one proxy must be configured in the 'proxies' list"))
-	} else {
-		for i, p := range appCfg.Proxies {
-			if p.Address == "" {
-				errs = append(errs, fmt.Errorf("proxy #%d: address cannot be empty", i+1))
-			} else {
-				_, _, err := net.SplitHostPort(p.Address)
-				if err != nil {
-
-					u, urlErr := url.Parse("socks5://" + p.Address)
-					if urlErr != nil || u.Host == "" {
-						errs = append(errs, fmt.Errorf("proxy #%d: invalid address format '%s': %w (original error: %v)", i+1, p.Address, err, urlErr))
-					} else if u.Port() == "" {
-                        errs = append(errs, fmt.Errorf("proxy #%d: address '%s' is missing a port", i+1, p.Address))
-                    }
+	if appCfg.ProxyReloadListenAddr != "" && appCfg.ProxyReloadToken == "" {
+		errs = append(errs, fmt.Errorf("proxy_reload_token must be set if proxy_reload_listen_addr is configured"))
+	}
+	
+	if appCfg.ProxyReloadListenAddr != "" {
+		_, _, err := net.SplitHostPort(appCfg.ProxyReloadListenAddr)
+		isJustPort := false
+		if err != nil {
+			if len(appCfg.ProxyReloadListenAddr) > 0 && appCfg.ProxyReloadListenAddr[0] == ':' {
+				_, portErr := net.LookupPort("tcp", appCfg.ProxyReloadListenAddr[1:])
+				if portErr == nil {
+					isJustPort = true
 				}
 			}
-			if (p.Username != "" && p.Password == "") || (p.Username == "" && p.Password != "") {
-				errs = append(errs, fmt.Errorf("proxy #%d ('%s'): username and password must both be set or both be empty", i+1, p.Address))
-			}
+		}
+		if err != nil && !isJustPort {
+			errs = append(errs, fmt.Errorf("invalid proxy_reload_listen_addr format '%s': %w. Expected host:port or :port", appCfg.ProxyReloadListenAddr, err))
 		}
 	}
 
