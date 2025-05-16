@@ -1,4 +1,4 @@
-package config // Имя пакета соответствует имени каталога
+package config 
 
 import (
 	"encoding/json"
@@ -6,28 +6,28 @@ import (
 	"os"
 	"time"
 
-	"github.com/sequring/chameleon/auth" // Импорт нашего пакета auth
+	"github.com/sequring/chameleon/auth" 
+	"github.com/sequring/chameleon/utils"
 )
 
-// Структура для отдельного прокси в файле конфигурации
-type ProxyEntry struct { // Переименовано, чтобы не конфликтовать с ProxyConfig из proxypool
+
+type ProxyEntry struct { 
 	Address  string `json:"address"`
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
 }
 
-// Основная структура конфигурации приложения
-type App struct { // Переименовано из AppConfig для краткости и избежания AppConfigConfig
+
+type App struct { 
 	ServerPort         string         `json:"server_port"`
 	Proxies            []ProxyEntry   `json:"proxies"`
 	ProxyCheckInterval string         `json:"proxy_check_interval"`
 	ProxyCheckTimeout  string         `json:"proxy_check_timeout"`
 	HealthCheckTarget  string         `json:"health_check_target"`
 	MetricsInterval    string         `json:"metrics_interval"`
-	Users              []auth.ClientConfig `json:"users"` // Используем ClientConfig из пакета auth
+	Users              []auth.ClientConfig `json:"users"` 
 }
 
-// Глобальные переменные для значений по умолчанию из строк
 var (
 	DefaultProxyCheckIntervalStr = "1m"
 	DefaultProxyCheckTimeoutStr  = "10s"
@@ -36,16 +36,13 @@ var (
 	DefaultHealthCheckTargetStr  = "www.google.com:443"
 )
 
-// Глобальные переменные для Duration, будут инициализированы в main.go
-// Они экспортируемы (начинаются с большой буквы), чтобы main мог их установить.
 var (
 	DefaultProxyCheckInterval time.Duration
 	DefaultProxyCheckTimeout  time.Duration
-	MetricsDisplayInterval    time.Duration // Это будет использоваться как значение по умолчанию для метрик
+	MetricsDisplayInterval    time.Duration 
 )
 
 
-// Load загружает конфигурацию из файла
 func Load(path string) (*App, error) {
 	configFile, err := os.ReadFile(path)
 	if err != nil {
@@ -58,7 +55,6 @@ func Load(path string) (*App, error) {
 		return nil, err
 	}
 
-	// Установка значений по умолчанию, если они не указаны в конфиге
 	if appCfg.ServerPort == "" {
 		appCfg.ServerPort = DefaultServerPortStr
 	}
@@ -74,9 +70,26 @@ func Load(path string) (*App, error) {
 	if appCfg.MetricsInterval == "" {
 		appCfg.MetricsInterval = DefaultMetricsIntervalStr
 	}
+
 	if len(appCfg.Users) == 0 {
-		log.Println("Warning: No users defined in config. Adding default user 'user:pass'.")
-		appCfg.Users = append(appCfg.Users, auth.ClientConfig{Username: "user", Password: "pass", Allowed: true})
+		username, errUser := utils.GenerateRandomUsername()
+		if errUser != nil {
+			log.Printf("Error generating random username: %v. Using fallback.", errUser)
+			username = "H9NrVNZeUupxfv4G9k"
+		}
+
+		password, errPass := utils.GenerateRandomSecurePassword()
+		if errPass != nil {
+			log.Printf("Error generating random password: %v. Using fallback.", errPass)
+			password = "zj9wq5FEH2jj8Ywt7Z" 
+		}
+
+		log.Printf("Warning: No users defined in config. Generating a random user.")
+		log.Printf("======== DEFAULT USER CREDENTIALS (save these!) ========")
+		log.Printf("Username: %s", username)
+		log.Printf("Password: %s", password)
+		log.Printf("==========================================================")
+		appCfg.Users = append(appCfg.Users, auth.ClientConfig{Username: username, Password: password, Allowed: true})
 	}
 
 	return &appCfg, nil

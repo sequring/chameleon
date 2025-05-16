@@ -1,53 +1,83 @@
+// main.go
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
+	"fmt"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"strings" 
 	"syscall"
 	"time"
 
 	"github.com/sequring/chameleon/auth"
-	"github.com/sequring/chameleon/config"
+	"github.com/sequring/chameleon/config" 
 	"github.com/sequring/chameleon/dialer"
 	"github.com/sequring/chameleon/proxypool"
+	"github.com/sequring/chameleon/utils"
 	"github.com/things-go/go-socks5"
 )
 
-func main() {
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+const AppVersion = "0.1.0"
 
-	var err error
+func main() {
+	configPath := flag.String("config", "config.json", "Path to the configuration file")
+	testConfig := flag.Bool("t", false, "Test configuration and exit")
+
+	flag.Parse()
+
+	log.SetFlags(0) 
+	appCfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading configuration from '%s': %v\n", *configPath, err)
+		fmt.Fprintln(os.Stderr, "Configuration test failed.")
+		os.Exit(1)
+	}
+
+	validationErrors := appCfg.Validate() 
+	if len(validationErrors) > 0 {
+		fmt.Fprintf(os.Stderr, "Configuration validation failed with %d error(s):\n", len(validationErrors))
+		errorMessages := make([]string, len(validationErrors))
+		for i, e := range validationErrors {
+			errorMessages[i] = fmt.Sprintf("  - %s", e.Error())
+		}
+		fmt.Fprintln(os.Stderr, strings.Join(errorMessages, "\n"))
+		os.Exit(1)
+	}
+
+	if *testConfig {
+		fmt.Println("Configuration test successful.")
+		os.Exit(0)
+	}
+
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds) 
+	utils.PrintBanner(AppVersion)
+
 	config.DefaultProxyCheckInterval, err = time.ParseDuration(config.DefaultProxyCheckIntervalStr)
 	if err != nil {
-		log.Fatalf("Invalid default proxy check interval string '%s': %v", config.DefaultProxyCheckIntervalStr, err)
+		log.Fatalf("Internal error: Invalid default proxy check interval string '%s': %v", config.DefaultProxyCheckIntervalStr, err)
 	}
 	config.DefaultProxyCheckTimeout, err = time.ParseDuration(config.DefaultProxyCheckTimeoutStr)
 	if err != nil {
-		log.Fatalf("Invalid default proxy check timeout string '%s': %v", config.DefaultProxyCheckTimeoutStr, err)
+		log.Fatalf("Internal error: Invalid default proxy check timeout string '%s': %v", config.DefaultProxyCheckTimeoutStr, err)
 	}
 	config.MetricsDisplayInterval, err = time.ParseDuration(config.DefaultMetricsIntervalStr)
 	if err != nil {
-		log.Fatalf("Invalid default metrics interval string '%s': %v", config.DefaultMetricsIntervalStr, err)
-	}
-
-	configPath := "config.json"
-	appCfg, err := config.Load(configPath)
-	if err != nil {
-		log.Fatalf("Failed to load configuration from %s: %v", configPath, err)
+		log.Fatalf("Internal error: Invalid default metrics interval string '%s': %v", config.DefaultMetricsIntervalStr, err)
 	}
 
 	authService := auth.New()
-	for _, u := range appCfg.Users {
+	for _, u := range appCfg.Users { 
 		authService.AddClient(u.Username, u.Password, u.Allowed)
 		log.Printf("Loaded user: %s (Allowed: %v)", u.Username, u.Allowed)
 	}
 
 	proxyListInternal := make([]*proxypool.ProxyConfig, 0, len(appCfg.Proxies))
-	for _, pEntry := range appCfg.Proxies {
+	for _, pEntry := range appCfg.Proxies { 
 		proxyListInternal = append(proxyListInternal, &proxypool.ProxyConfig{
 			Address:  pEntry.Address,
 			Username: pEntry.Username,
@@ -60,23 +90,11 @@ func main() {
 		log.Println("WARNING: No proxies configured in config file.")
 	}
 
-	proxyCheckInterval, err := time.ParseDuration(appCfg.ProxyCheckInterval)
-	if err != nil {
-		log.Printf("Warning: Invalid proxy_check_interval '%s' in config, using default %s. Error: %v", appCfg.ProxyCheckInterval, config.DefaultProxyCheckInterval, err)
-		proxyCheckInterval = config.DefaultProxyCheckInterval
-	}
+	
+	proxyCheckInterval, _ := time.ParseDuration(appCfg.ProxyCheckInterval) 
+	proxyCheckTimeout, _ := time.ParseDuration(appCfg.ProxyCheckTimeout)   
+	currentMetricsInterval, _ := time.ParseDuration(appCfg.MetricsInterval) 
 
-	proxyCheckTimeout, err := time.ParseDuration(appCfg.ProxyCheckTimeout)
-	if err != nil {
-		log.Printf("Warning: Invalid proxy_check_timeout '%s' in config, using default %s. Error: %v", appCfg.ProxyCheckTimeout, config.DefaultProxyCheckTimeout, err)
-		proxyCheckTimeout = config.DefaultProxyCheckTimeout
-	}
-
-	currentMetricsInterval, err := time.ParseDuration(appCfg.MetricsInterval)
-	if err != nil {
-		log.Printf("Warning: Invalid metrics_interval '%s' in config, using default %s. Error: %v", appCfg.MetricsInterval, config.MetricsDisplayInterval, err)
-		currentMetricsInterval = config.MetricsDisplayInterval
-	}
 
 	pool := proxypool.New(
 		proxyListInternal,
