@@ -1,4 +1,3 @@
-// main.go
 package main
 
 import (
@@ -10,13 +9,14 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strings" 
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/sequring/chameleon/auth"
-	"github.com/sequring/chameleon/config" 
+	"github.com/sequring/chameleon/config"
 	"github.com/sequring/chameleon/dialer"
+	"github.com/sequring/chameleon/metrics" 
 	"github.com/sequring/chameleon/proxypool"
 	"github.com/sequring/chameleon/utils"
 	"github.com/things-go/go-socks5"
@@ -27,10 +27,12 @@ const AppVersion = "0.1.0"
 func main() {
 	configPath := flag.String("config", "config.json", "Path to the configuration file")
 	testConfig := flag.Bool("t", false, "Test configuration and exit")
+	disableTextMetrics := flag.Bool("no-text-metrics", true, "Disable legacy text metrics output to log")
 
 	flag.Parse()
 
-	log.SetFlags(0) 
+	log.SetFlags(0)
+
 	appCfg, err := config.Load(*configPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error loading configuration from '%s': %v\n", *configPath, err)
@@ -38,7 +40,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	validationErrors := appCfg.Validate() 
+	validationErrors := appCfg.Validate()
 	if len(validationErrors) > 0 {
 		fmt.Fprintf(os.Stderr, "Configuration validation failed with %d error(s):\n", len(validationErrors))
 		errorMessages := make([]string, len(validationErrors))
@@ -53,8 +55,7 @@ func main() {
 		fmt.Println("Configuration test successful.")
 		os.Exit(0)
 	}
-
-	log.SetFlags(log.LstdFlags | log.Lmicroseconds) 
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	utils.PrintBanner(AppVersion)
 
 	config.DefaultProxyCheckInterval, err = time.ParseDuration(config.DefaultProxyCheckIntervalStr)
@@ -71,29 +72,24 @@ func main() {
 	}
 
 	authService := auth.New()
-	for _, u := range appCfg.Users { 
+	for _, u := range appCfg.Users {
 		authService.AddClient(u.Username, u.Password, u.Allowed)
 		log.Printf("Loaded user: %s (Allowed: %v)", u.Username, u.Allowed)
 	}
 
 	proxyListInternal := make([]*proxypool.ProxyConfig, 0, len(appCfg.Proxies))
-	for _, pEntry := range appCfg.Proxies { 
+	for _, pEntry := range appCfg.Proxies {
 		proxyListInternal = append(proxyListInternal, &proxypool.ProxyConfig{
 			Address:  pEntry.Address,
 			Username: pEntry.Username,
 			Password: pEntry.Password,
-			IsActive: false,
+			IsActive: false, 
 		})
 	}
 
-	if len(proxyListInternal) == 0 {
-		log.Println("WARNING: No proxies configured in config file.")
-	}
-
-	
-	proxyCheckInterval, _ := time.ParseDuration(appCfg.ProxyCheckInterval) 
-	proxyCheckTimeout, _ := time.ParseDuration(appCfg.ProxyCheckTimeout)   
-	currentMetricsInterval, _ := time.ParseDuration(appCfg.MetricsInterval) 
+	proxyCheckInterval, _ := time.ParseDuration(appCfg.ProxyCheckInterval)
+	proxyCheckTimeout, _ := time.ParseDuration(appCfg.ProxyCheckTimeout)
+	currentMetricsInterval, _ := time.ParseDuration(appCfg.MetricsInterval)
 
 
 	pool := proxypool.New(
@@ -103,16 +99,44 @@ func main() {
 		appCfg.HealthCheckTarget,
 	)
 
-	metricsSvc := &dialer.Metrics{}
-	appDialer := dialer.New(pool, metricsSvc)
 
+	oldMetricsSvc := &dialer.Metrics{} 
+	appDialer := dialer.New(pool, oldMetricsSvc) 
+	
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
 
-	go dialer.PrintMetrics(appCtx, currentMetricsInterval, pool, metricsSvc)
+	if appCfg.PrometheusListenAddr != "" {
+		promExporter := metrics.NewPrometheusExporter(pool, appCfg.PrometheusListenAddr)
+		promExporter.Start() 
+
+		go func() {
+			ticker := time.NewTicker(currentMetricsInterval)
+			defer ticker.Stop()
+			log.Println("Prometheus proxy metrics updater started.")
+			for {
+				select {
+				case <-ticker.C:
+					promExporter.UpdateProxyMetrics()
+				case <-appCtx.Done():
+					log.Println("Prometheus proxy metrics updater stopping...")
+					return
+				}
+			}
+		}()
+	} else {
+		log.Println("Prometheus metrics endpoint is disabled (prometheus_listen_addr not set in config).")
+	}
+
+
+	if !*disableTextMetrics {
+		go dialer.PrintMetrics(appCtx, currentMetricsInterval, pool, oldMetricsSvc)
+	} else {
+		log.Println("Legacy text metrics output is disabled by flag.")
+	}
+
 
 	socksServerLogger := log.New(log.Writer(), "[SOCKS5_LIB] ", log.LstdFlags|log.Lmicroseconds)
-
 	server := socks5.NewServer(
 		socks5.WithDial(appDialer.Dial),
 		socks5.WithAuthMethods([]socks5.Authenticator{
@@ -137,15 +161,15 @@ func main() {
 
 	select {
 	case errVal, ok := <-errChan:
-		if ok && errVal != nil {
-			log.Fatalf("Failed to start or run SOCKS5 server: %v", errVal)
-		} else if !ok {
+		if ok && errVal != nil { 
+			log.Fatalf("SOCKS5 server failed: %v", errVal)
+		} else if !ok { 
 			log.Println("SOCKS5 server has stopped (errChan closed).")
 		}
 	case s := <-sigChan:
 		log.Printf("Received signal: %v. Shutting down...", s)
-		appCancel()
-		pool.Stop()
+		appCancel()      
+		pool.Stop()      
 		log.Println("SOCKS5 server will stop as part of process termination.")
 	}
 	log.Println("Application finished.")

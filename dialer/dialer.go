@@ -1,3 +1,4 @@
+// dialer/dialer.go
 package dialer
 
 import (
@@ -8,28 +9,31 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sequring/chameleon/proxypool" 
+	"github.com/sequring/chameleon/metrics" 
+	"github.com/sequring/chameleon/proxypool"
 	px "golang.org/x/net/proxy"
 )
 
 type Dialer struct {
-	pool    *proxypool.Pool 
-	metrics *Metrics        
+	pool         *proxypool.Pool
+	commonMetrics *Metrics 
 }
 
-func New(pool *proxypool.Pool, metrics *Metrics) *Dialer {
+func New(pool *proxypool.Pool, commonMetrics *Metrics) *Dialer {
 	return &Dialer{
-		pool:    pool,
-		metrics: metrics,
+		pool:         pool,
+		commonMetrics: commonMetrics,
 	}
 }
 
 func (d *Dialer) Dial(ctx context.Context, network, addr string) (net.Conn, error) {
-	atomic.AddUint64(&d.metrics.TotalRequests, 1)
+	metrics.SocksRequestsTotal.Inc()
+	atomic.AddUint64(&d.commonMetrics.TotalRequests, 1) 
 
 	proxyCfg, err := d.pool.GetActiveProxy()
 	if err != nil {
-		atomic.AddUint64(&d.metrics.TotalFailed, 1)
+		metrics.SocksRequestsFailedTotal.Inc()
+		atomic.AddUint64(&d.commonMetrics.TotalFailed, 1) 
 		log.Printf("Failed to get active proxy: %v", err)
 		return nil, err
 	}
@@ -41,14 +45,17 @@ func (d *Dialer) Dial(ctx context.Context, network, addr string) (net.Conn, erro
 
 	upstreamDialer, err := px.SOCKS5(network, proxyCfg.Address, auth, px.Direct)
 	if err != nil {
-		atomic.AddUint64(&d.metrics.TotalFailed, 1)
-		atomic.AddUint32(&proxyCfg.FailCount, 1)
+		metrics.SocksRequestsFailedTotal.Inc()
+		atomic.AddUint64(&d.commonMetrics.TotalFailed, 1) 
+
+		metrics.UpstreamProxyFailTotal.WithLabelValues(proxyCfg.Address).Inc()
+		atomic.AddUint32(&proxyCfg.FailCount, 1) 
+
 		log.Printf("Proxy %s: failed to create SOCKS5 dialer for client request to %s: %v", proxyCfg.Address, addr, err)
 		return nil, err
 	}
 
 	dialOpTimeout := 15 * time.Second
-
 	dialProxyCtx, dialProxyCancel := context.WithTimeout(ctx, dialOpTimeout)
 	defer dialProxyCancel()
 
@@ -66,18 +73,30 @@ func (d *Dialer) Dial(ctx context.Context, network, addr string) (net.Conn, erro
 
 	select {
 	case c := <-connCh:
-		atomic.AddUint64(&d.metrics.TotalSuccess, 1)
+		metrics.SocksRequestsSuccessTotal.Inc()
+		atomic.AddUint64(&d.commonMetrics.TotalSuccess, 1)
+
+		metrics.UpstreamProxySuccessTotal.WithLabelValues(proxyCfg.Address).Inc()
 		atomic.AddUint32(&proxyCfg.SuccessCount, 1)
+
 		log.Printf("Successfully connected to %s via proxy %s", addr, proxyCfg.Address)
 		return c, nil
 	case e := <-errCh:
-		atomic.AddUint64(&d.metrics.TotalFailed, 1)
-		atomic.AddUint32(&proxyCfg.FailCount, 1)
+		metrics.SocksRequestsFailedTotal.Inc()
+		atomic.AddUint64(&d.commonMetrics.TotalFailed, 1) 
+
+		metrics.UpstreamProxyFailTotal.WithLabelValues(proxyCfg.Address).Inc()
+		atomic.AddUint32(&proxyCfg.FailCount, 1) 
+
 		log.Printf("Failed to connect to %s via proxy %s: %v (dialProxyCtx.Err: %v, original_ctx.Err: %v)", addr, proxyCfg.Address, e, dialProxyCtx.Err(), ctx.Err())
 		return nil, e
 	case <-dialProxyCtx.Done():
-		atomic.AddUint64(&d.metrics.TotalFailed, 1)
-		atomic.AddUint32(&proxyCfg.FailCount, 1)
+		metrics.SocksRequestsFailedTotal.Inc()
+		atomic.AddUint64(&d.commonMetrics.TotalFailed, 1) 
+
+		metrics.UpstreamProxyFailTotal.WithLabelValues(proxyCfg.Address).Inc()
+		atomic.AddUint32(&proxyCfg.FailCount, 1) 
+		
 		err := errors.New("dialing " + addr + " via proxy " + proxyCfg.Address + " timed out or was cancelled: " + dialProxyCtx.Err().Error())
 		log.Print(err.Error())
 		return nil, err

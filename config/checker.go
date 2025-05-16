@@ -43,6 +43,23 @@ func (appCfg *App) Validate() []error {
 		}
 	}
 
+		if appCfg.PrometheusListenAddr != "" {
+		_, _, err := net.SplitHostPort(appCfg.PrometheusListenAddr)
+		isJustPort := false
+		if err != nil {
+			if len(appCfg.PrometheusListenAddr) > 0 && appCfg.PrometheusListenAddr[0] == ':' {
+				_, portErr := net.LookupPort("tcp", appCfg.PrometheusListenAddr[1:])
+				if portErr == nil {
+					isJustPort = true
+				}
+			}
+		}
+		if err != nil && !isJustPort {
+			errs = append(errs, fmt.Errorf("invalid prometheus_listen_addr format '%s': %w. Expected host:port or :port", appCfg.PrometheusListenAddr, err))
+		}
+	}
+
+
 	if len(appCfg.Proxies) == 0 {
 		errs = append(errs, fmt.Errorf("at least one proxy must be configured in the 'proxies' list"))
 	} else {

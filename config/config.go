@@ -25,7 +25,8 @@ type App struct {
 	ProxyCheckTimeout  string         `json:"proxy_check_timeout"`
 	HealthCheckTarget  string         `json:"health_check_target"`
 	MetricsInterval    string         `json:"metrics_interval"`
-	Users              []auth.ClientConfig `json:"users"` 
+	Users              []auth.ClientConfig `json:"users"`
+	PrometheusListenAddr string         `json:"prometheus_listen_addr,omitempty"` 
 }
 
 var (
@@ -34,6 +35,7 @@ var (
 	DefaultMetricsIntervalStr    = "30s"
 	DefaultServerPortStr         = ":1080"
 	DefaultHealthCheckTargetStr  = "www.google.com:443"
+	DefaultPrometheusListenAddr = ":9091"
 )
 
 var (
@@ -69,6 +71,9 @@ func Load(path string) (*App, error) {
 	}
 	if appCfg.MetricsInterval == "" {
 		appCfg.MetricsInterval = DefaultMetricsIntervalStr
+	}
+		if appCfg.PrometheusListenAddr == "" {
+		appCfg.PrometheusListenAddr = DefaultPrometheusListenAddr
 	}
 
 	if len(appCfg.Users) == 0 {
