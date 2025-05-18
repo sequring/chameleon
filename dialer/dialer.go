@@ -1,4 +1,3 @@
-// dialer/dialer.go
 package dialer
 
 import (

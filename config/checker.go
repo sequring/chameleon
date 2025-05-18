@@ -1,108 +1,77 @@
-// config/checker.go
 package config
 
 import (
 	"fmt"
 	"net"
-	"time"
+	"strconv"
 )
-
-type UserEntry struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
-	Allowed  bool   `json:"allowed"`
-}
 
 func (appCfg *App) Validate() []error {
 	var errs []error
 
-	if appCfg.ServerPort == "" {
-		errs = append(errs, fmt.Errorf("server_port must be set"))
-	} else if _, _, err := net.SplitHostPort(appCfg.ServerPort); err != nil && !isValidPort(appCfg.ServerPort) {
-		errs = append(errs, fmt.Errorf("invalid server_port format '%s': %w. Expected host:port or :port", appCfg.ServerPort, err))
+	// Validate server configuration
+	if appCfg.Server.SocksPort == "" {
+		errs = append(errs, fmt.Errorf("server.socks_port must be set"))
+	} else if _, _, err := net.SplitHostPort(appCfg.Server.SocksPort); err != nil && !isValidPort(appCfg.Server.SocksPort) {
+		errs = append(errs, fmt.Errorf("invalid server.socks_port format '%s': %w. Expected 'port', ':port', or 'host:port'", appCfg.Server.SocksPort, err))
 	}
 
-
-	if _, err := time.ParseDuration(appCfg.ProxyCheckInterval); err != nil {
-		errs = append(errs, fmt.Errorf("invalid proxy_check_interval '%s': %w", appCfg.ProxyCheckInterval, err))
-	}
-	if _, err := time.ParseDuration(appCfg.ProxyCheckTimeout); err != nil {
-		errs = append(errs, fmt.Errorf("invalid proxy_check_timeout '%s': %w", appCfg.ProxyCheckTimeout, err))
-	}
-	if _, err := time.ParseDuration(appCfg.MetricsInterval); err != nil {
-		errs = append(errs, fmt.Errorf("invalid metrics_interval '%s': %w", appCfg.MetricsInterval, err))
+	// Validate proxy configuration
+	if appCfg.Proxies.ConfigFilePath == "" {
+		errs = append(errs, fmt.Errorf("proxies.config_file_path must be set"))
 	}
 
-	if appCfg.HealthCheckTarget == "" {
-		errs = append(errs, fmt.Errorf("health_check_target must be set"))
-	} else {
-		_, _, err := net.SplitHostPort(appCfg.HealthCheckTarget)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("invalid health_check_target format '%s': %w. Expected host:port", appCfg.HealthCheckTarget, err))
-		}
+	// Validate health check target
+	if appCfg.Proxies.HealthCheckTarget == "" {
+		errs = append(errs, fmt.Errorf("proxies.health_check_target must be set"))
+	} else if _, _, err := net.SplitHostPort(appCfg.Proxies.HealthCheckTarget); err != nil {
+		errs = append(errs, fmt.Errorf("invalid proxies.health_check_target format '%s': %w. Expected host:port", appCfg.Proxies.HealthCheckTarget, err))
 	}
 
-	if appCfg.PrometheusListenAddr != "" {
-		_, _, err := net.SplitHostPort(appCfg.PrometheusListenAddr)
+	// Validate admin port if set
+	if appCfg.Server.AdminPort != "" {
+		_, _, err := net.SplitHostPort(appCfg.Server.AdminPort)
 		isJustPort := false
 		if err != nil {
-			if len(appCfg.PrometheusListenAddr) > 0 && appCfg.PrometheusListenAddr[0] == ':' {
-				_, portErr := net.LookupPort("tcp", appCfg.PrometheusListenAddr[1:])
-				if portErr == nil {
-					isJustPort = true
-				}
-			}
-	}
-	if err != nil && !isJustPort {
-			errs = append(errs, fmt.Errorf("invalid prometheus_listen_addr format '%s': %w. Expected host:port or :port", appCfg.PrometheusListenAddr, err))
-		}
-	}
-
-if appCfg.ProxiesFilePath == "" {
-		errs = append(errs, fmt.Errorf("proxies_file_path must be set"))
-	}
-
-	if appCfg.ProxyReloadListenAddr != "" && appCfg.ProxyReloadToken == "" {
-		errs = append(errs, fmt.Errorf("proxy_reload_token must be set if proxy_reload_listen_addr is configured"))
-	}
-	
-	if appCfg.ProxyReloadListenAddr != "" {
-		_, _, err := net.SplitHostPort(appCfg.ProxyReloadListenAddr)
-		isJustPort := false
-		if err != nil {
-			if len(appCfg.ProxyReloadListenAddr) > 0 && appCfg.ProxyReloadListenAddr[0] == ':' {
-				_, portErr := net.LookupPort("tcp", appCfg.ProxyReloadListenAddr[1:])
-				if portErr == nil {
-					isJustPort = true
-				}
-			}
+if len(appCfg.Server.AdminPort) > 0 && appCfg.Server.AdminPort[0] == ':' &&
+   isValidPort(appCfg.Server.AdminPort[1:]) {
+    isJustPort = true
+}
 		}
 		if err != nil && !isJustPort {
-			errs = append(errs, fmt.Errorf("invalid proxy_reload_listen_addr format '%s': %w. Expected host:port or :port", appCfg.ProxyReloadListenAddr, err))
+			errs = append(errs, fmt.Errorf("invalid server.admin_port format '%s': %w. Expected host:port or :port", appCfg.Server.AdminPort, err))
 		}
 	}
 
-	if len(appCfg.Users) > 0 {
-		for i, u := range appCfg.Users {
-			if u.Username == "" {
-				errs = append(errs, fmt.Errorf("user #%d: username cannot be empty (this should not happen with auto-generation)", i+1))
-			}
-			if u.Password == "" {
-				errs = append(errs, fmt.Errorf("user #%d ('%s'): password cannot be empty (this should not happen with auto-generation)", i+1, u.Username))
-			}
-		}
-	} else {
-		errs = append(errs, fmt.Errorf("internal error: user list is unexpectedly empty after loading configuration"))
+	// Validate users configuration
+	if appCfg.Users.ConfigFilePath == "" {
+		errs = append(errs, fmt.Errorf("users.config_file_path must be set"))
 	}
 
+	// Validate webhook URL if set
+	if appCfg.Webhook.URL != "" {
+		if appCfg.Webhook.PostTimeoutSec <= 0 {
+			errs = append(errs, fmt.Errorf("webhook.post_timeout_seconds must be greater than 0"))
+		}
+	}
 
 	return errs
 }
 
-func isValidPort(s string) bool {
-    if len(s) > 0 && s[0] == ':' {
-        _, err := net.LookupPort("tcp", s[1:])
-        return err == nil
-    }
-    return false
+// Helper function to check if a string is a valid port
+func isValidPort(portStr string) bool {
+	if len(portStr) == 0 {
+		return false
+	}
+	// Remove leading colon if present
+	if portStr[0] == ':' {
+		portStr = portStr[1:]
+	}
+	// Parse the port number
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return false
+	}
+	// Check if port is in valid range (1-65535)
+	return port > 0 && port <= 65535
 }

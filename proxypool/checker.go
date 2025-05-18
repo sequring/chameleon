@@ -1,17 +1,40 @@
-// proxypool/checker.go
 package proxypool
 
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"log"
 	"net"
 	"strings"
-	// "sync" // Больше не нужен здесь, если checkAllProxies удален или пуст
 	"time"
 
 	px "golang.org/x/net/proxy"
 )
+
+// TLSCheckConfig holds configuration for TLS certificate verification during health checks
+type TLSCheckConfig struct {
+	// SkipVerify disables certificate verification if set to true.
+	// WARNING: Setting this to true makes the connection vulnerable to man-in-the-middle attacks.
+	// Only use this for testing or in trusted environments.
+	SkipVerify bool
+
+	// RootCAs is an optional pool of root certificates to use for verification.
+	// If nil, the system's default root certificates are used.
+	RootCAs *x509.CertPool
+
+	// ServerName is used for both SNI and certificate verification.
+	// If empty, the hostname from the target URL will be used.
+	ServerName string
+}
+
+// DefaultTLSCheckConfig returns a secure default configuration for TLS checks
+func DefaultTLSCheckConfig() *TLSCheckConfig {
+	return &TLSCheckConfig{
+		SkipVerify: false,
+		RootCAs:    nil, // Use system certs by default
+	}
+}
 
 // checkAllProxies - этот метод в текущей архитектуре с healthCheckLoopForProxy
 // практически не нужен для регулярных проверок. Первоначальные запуски проверок
@@ -84,14 +107,60 @@ func (p *Pool) checkProxy(ctx context.Context, proxyCfg *ProxyConfig) { // Ре�
 	}
 	defer conn.Close()
 
-	tlsConn := tls.Client(conn, &tls.Config{
-		ServerName: hostNameForTLS,
-		MinVersion: tls.VersionTLS12,
-	})
+	// Get the current TLS config atomically
+	tlsConfig, _ := p.tlsCheckConfig.Load().(*TLSCheckConfig)
+	if tlsConfig == nil {
+		tlsConfig = DefaultTLSCheckConfig()
+	}
+
+	// Create a secure TLS configuration for health checks
+	tlsCfg := &tls.Config{
+		ServerName:         hostNameForTLS,
+		InsecureSkipVerify: tlsConfig.SkipVerify,
+		RootCAs:           tlsConfig.RootCAs,
+		MinVersion:         tls.VersionTLS12,
+	}
+
+	// Set up the VerifyConnection callback
+	tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+		// Get fresh config in case it was updated
+		currentTLSConfig, _ := p.tlsCheckConfig.Load().(*TLSCheckConfig)
+		if currentTLSConfig == nil {
+			currentTLSConfig = DefaultTLSCheckConfig()
+		}
+
+		// If verification is disabled, just log a warning and return
+		if currentTLSConfig.SkipVerify {
+			log.Printf("WARNING: TLS certificate verification is disabled for proxy %s. This is not recommended for production use.", addrToCheck)
+			return nil
+		}
+
+		// Standard verification
+		opts := x509.VerifyOptions{
+			Roots:         currentTLSConfig.RootCAs,
+			Intermediates: x509.NewCertPool(),
+			KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		}
+
+		if currentTLSConfig.ServerName != "" {
+			opts.DNSName = currentTLSConfig.ServerName
+		}
+
+		// Add all certificates except the first one (the leaf) to the intermediates pool
+		for _, cert := range cs.PeerCertificates[1:] {
+			opts.Intermediates.AddCert(cert)
+		}
+
+		// Verify the certificate chain
+		_, err := cs.PeerCertificates[0].Verify(opts)
+		// Only return the error, don't log successful verifications
+		return err
+	}
+	tlsConn := tls.Client(conn, tlsCfg)
 
 	if dl, ok := checkCtx.Deadline(); ok {
 		if err := conn.SetDeadline(dl); err != nil {
-			log.Printf("Proxy %s: failed to set deadline for TLS handshake: %v", addrToCheck, err)
+			// Don't log failed deadline settings as they're not critical
 		}
 	}
 

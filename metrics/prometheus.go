@@ -1,15 +1,17 @@
-// metrics/prometheus.go
 package metrics
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sequring/chameleon/proxypool" 
+	"github.com/sequring/chameleon/proxypool"
 )
 
 const namespace = "chameleon" 
@@ -72,8 +74,10 @@ var (
 
 type PrometheusExporter struct {
 	pool            *proxypool.Pool
+	server         *http.Server
 	listenAddress   string
-	proxyMetricsMap sync.Map 
+	proxyMetricsMap sync.Map
+	mu             sync.Mutex
 }
 
 func NewPrometheusExporter(pool *proxypool.Pool, listenAddress string) *PrometheusExporter {
@@ -83,19 +87,54 @@ func NewPrometheusExporter(pool *proxypool.Pool, listenAddress string) *Promethe
 	}
 }
 
-func (pe *PrometheusExporter) Start() {
+// Start starts the Prometheus metrics HTTP server and returns an error if the server fails to start.
+// If the listen address is empty, it returns immediately with no error.
+func (pe *PrometheusExporter) Start() error {
 	if pe.listenAddress == "" {
 		log.Println("Prometheus metrics endpoint is disabled (no listen address specified).")
-		return
+		return nil
 	}
 
-	go func() {
-		log.Printf("Starting Prometheus metrics HTTP server on %s/metrics", pe.listenAddress)
-		http.Handle("/metrics", promhttp.Handler())
-		if err := http.ListenAndServe(pe.listenAddress, nil); err != nil {
-			log.Printf("Error starting Prometheus metrics HTTP server: %v", err)
-		}
-	}()
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
+
+	if pe.server != nil {
+		log.Println("Prometheus metrics server is already running")
+		return nil
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+
+	pe.server = &http.Server{
+		Addr:    pe.listenAddress,
+		Handler: mux,
+	}
+
+	log.Printf("Starting Prometheus metrics HTTP server on %s/metrics", pe.listenAddress)
+	if err := pe.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return fmt.Errorf("failed to start Prometheus metrics server: %w", err)
+	}
+
+	return nil
+}
+
+// Stop gracefully shuts down the Prometheus metrics server
+func (pe *PrometheusExporter) Stop() error {
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
+
+	if pe.server == nil {
+		return nil
+	}
+
+	log.Println("Shutting down Prometheus metrics server...")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := pe.server.Shutdown(ctx)
+	pe.server = nil
+	return err
 }
 
 func (pe *PrometheusExporter) UpdateProxyMetrics() {

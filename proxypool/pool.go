@@ -1,66 +1,95 @@
-// proxypool/pool.go
 package proxypool
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"log"
 	"math/rand"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sequring/chameleon/config"
 )
 
-// Pool - это определение типа, оно должно быть здесь.
+// Pool manages a collection of proxy connections and their health checks
 type Pool struct {
 	definitionsManager *config.ProxyDefinitionsManager
-	proxies            map[string]*ProxyConfig
-	mu                 sync.RWMutex
-	checkInterval      time.Duration
-	timeout            time.Duration
-	testURL            string
-	wg                 sync.WaitGroup
+	proxies           map[string]*ProxyConfig
+	mu                sync.RWMutex
+	checkInterval     time.Duration
+	timeout           time.Duration
+	testURL           string
+	wg                sync.WaitGroup
 	overallShutdownCtx    context.Context
 	overallShutdownCancel context.CancelFunc
-	reloadListenerStop chan struct{}
+	tlsCheckConfig    atomic.Value // *TLSCheckConfig
 }
 
-// New создает и инициализирует ProxyPool.
+// New creates and initializes a new ProxyPool with secure defaults
 func New(
 	definitionsMgr *config.ProxyDefinitionsManager,
 	checkInterval, timeout time.Duration,
 	testURL string,
-) *Pool { // Убедимся, что возвращаемый тип Pool корректен
+) *Pool {
 	overallCtx, overallCancel := context.WithCancel(context.Background())
-	pool := &Pool{ // Используем Pool
+	pool := &Pool{
 		definitionsManager: definitionsMgr,
-		proxies:            make(map[string]*ProxyConfig),
-		checkInterval:      checkInterval,
-		timeout:            timeout,
-		testURL:            testURL,
+		proxies:           make(map[string]*ProxyConfig),
+		checkInterval:     checkInterval,
+		timeout:           timeout,
+		testURL:           testURL,
 		overallShutdownCtx:    overallCtx,
 		overallShutdownCancel: overallCancel,
-		reloadListenerStop: make(chan struct{}),
 	}
+	pool.tlsCheckConfig.Store(DefaultTLSCheckConfig())
 
 	if err := pool.reloadAndReconcileProxies(); err != nil {
 		log.Printf("Error during initial proxy load: %v. Pool might be empty or outdated.", err)
 	}
 
-	pool.wg.Add(1)
-	go pool.listenForReloads()
-
 	return pool
 }
 
 // reloadAndReconcileProxies загружает новые определения и обновляет внутреннее состояние пула.
+// equalStringSlices checks if two string slices contain the same elements regardless of order
+func equalStringSlices(a, b []string) bool {
+    if len(a) != len(b) {
+        return false
+    }
+    
+    items := make(map[string]struct{}, len(a))
+    for _, v := range a {
+        items[v] = struct{}{}
+    }
+    
+    for _, v := range b {
+        if _, exists := items[v]; !exists {
+            return false
+        }
+    }
+    
+    return true
+}
+
 func (p *Pool) reloadAndReconcileProxies() error {
 	log.Println("Reloading and reconciling proxies...")
 	newDefinitions := p.definitionsManager.GetDefinitions()
 
+	// Log just the count of proxies loaded, not the details
+	log.Printf("Loaded %d proxy definitions", len(newDefinitions))
+	
+	// Debug logging - uncomment only when needed for troubleshooting
+	// for i, def := range newDefinitions {
+	// 	log.Printf("  [%d] %s (User: %s, Tags: %v, Desc: %s)", 
+	// 		i+1, def.Address, def.Username, def.Tags, def.Description)
+	// }
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	log.Printf("Current active proxies before reconciliation: %d", len(p.proxies))
 
 	newProxiesMap := make(map[string]*config.ProxyDefinition)
 	for i := range newDefinitions {
@@ -68,14 +97,16 @@ func (p *Pool) reloadAndReconcileProxies() error {
 		newProxiesMap[def.Address] = def
 	}
 
+	// Remove proxies that are no longer in the config
 	for addr, existingProxyCfg := range p.proxies {
 		if _, existsInNew := newProxiesMap[addr]; !existsInNew {
-			log.Printf("Proxy %s removed, stopping its health check.", addr)
+			log.Printf("Proxy %s removed from configuration, stopping its health check.", addr)
 			existingProxyCfg.shutdownHealthCheck()
 			delete(p.proxies, addr)
 		}
 	}
 
+	// Add or update proxies
 	for addr, newDef := range newProxiesMap {
 		if existingProxyCfg, exists := p.proxies[addr]; exists {
 			needsRestart := false
@@ -83,13 +114,15 @@ func (p *Pool) reloadAndReconcileProxies() error {
 				log.Printf("Proxy %s credentials changed.", addr)
 				needsRestart = true
 			}
-			// Обновляем теги и описание в любом случае
+			// Update tags and description
 			existingProxyCfg.Mu.Lock()
+			tagsChanged := !equalStringSlices(existingProxyCfg.Tags, newDef.Tags)
+			descChanged := existingProxyCfg.Description != newDef.Description
 			existingProxyCfg.Tags = newDef.Tags
 			existingProxyCfg.Description = newDef.Description
 			existingProxyCfg.Mu.Unlock()
 
-			if needsRestart {
+			if needsRestart || tagsChanged || descChanged {
 				log.Printf("Restarting health check for proxy %s due to config changes.", addr)
 				existingProxyCfg.shutdownHealthCheck()
 				p.proxies[addr] = p.createAndStartProxyConfig(newDef)
@@ -99,7 +132,18 @@ func (p *Pool) reloadAndReconcileProxies() error {
 			p.proxies[addr] = p.createAndStartProxyConfig(newDef)
 		}
 	}
-	log.Printf("Proxies reconciled. Current active proxy count: %d", len(p.proxies))
+
+	activeCount := 0
+	for _, proxy := range p.proxies {
+		proxy.Mu.RLock()
+		if proxy.IsActive {
+			activeCount++
+		}
+		proxy.Mu.RUnlock()
+	}
+
+	log.Printf("Proxies reconciled. Total proxies: %d, Active proxies: %d", 
+		len(p.proxies), activeCount)
 	return nil
 }
 
@@ -116,27 +160,6 @@ func (p *Pool) createAndStartProxyConfig(def *config.ProxyDefinition) *ProxyConf
 	p.wg.Add(1)
 	go p.healthCheckLoopForProxy(proxyCfg)
 	return proxyCfg
-}
-
-// listenForReloads слушает канал перезагрузки и вызывает reconcile.
-func (p *Pool) listenForReloads() {
-	defer p.wg.Done()
-	log.Println("ProxyPool: reload listener started.")
-	for {
-		select {
-		case <-p.definitionsManager.ReloadChannel():
-			log.Println("ProxyPool: Received reload signal.")
-			if err := p.reloadAndReconcileProxies(); err != nil {
-				log.Printf("Error during proxy reconciliation: %v", err)
-			}
-		case <-p.reloadListenerStop:
-			log.Println("ProxyPool: reload listener stopping.")
-			return
-		case <-p.overallShutdownCtx.Done():
-			log.Println("ProxyPool: reload listener stopping due to overall shutdown.")
-			return
-		}
-	}
 }
 
 // healthCheckLoopForProxy - цикл проверки для одного ProxyConfig.
@@ -197,18 +220,29 @@ func (p *Pool) GetActiveProxy() (*ProxyConfig, error) {
 	return activeProxies[rand.Intn(len(activeProxies))], nil
 }
 
-// Stop останавливает все health checks и слушателя перезагрузки.
+// ConfigureTLS sets the TLS verification options for proxy health checks.
+// skipVerify: If true, disables certificate verification (insecure, not recommended for production).
+// rootCAs: Optional pool of root CAs to use for verification. If nil, system defaults are used.
+// serverName: Optional server name for SNI and certificate validation.
+func (p *Pool) ConfigureTLS(skipVerify bool, rootCAs *x509.CertPool, serverName string) {
+	// Create a new config with the provided values
+	newConfig := DefaultTLSCheckConfig()
+	newConfig.SkipVerify = skipVerify
+	newConfig.RootCAs = rootCAs
+	newConfig.ServerName = serverName
+
+	// Atomically store the new config
+	p.tlsCheckConfig.Store(newConfig)
+
+	if skipVerify {
+		log.Println("WARNING: TLS certificate verification is disabled. This makes the connection vulnerable to man-in-the-middle attacks!")
+	}
+}
+
+// Stop stops all health checks and cleans up resources
 func (p *Pool) Stop() {
 	log.Println("ProxyPool stopping all operations...")
-	// Сигнал для остановки слушателя перезагрузок (если он еще не остановлен overallShutdown)
-	select {
-	case <-p.reloadListenerStop: // уже закрыт
-	default:
-		close(p.reloadListenerStop)
-	}
-
-	p.overallShutdownCancel() // Сигнал для остановки всех health check горутин
-	
+	p.overallShutdownCancel() // Signal all health check goroutines to stop
 	p.wg.Wait()
 	log.Println("ProxyPool stopped.")
 }

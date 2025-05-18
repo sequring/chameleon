@@ -1,9 +1,10 @@
 package proxypool
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"time"
-	"context"
 )
 
 type ProxyConfig struct {
@@ -29,6 +30,14 @@ func (pc *ProxyConfig) MarkActive(responseTime time.Duration) {
 	pc.IsActive = true
 	pc.LastCheck = time.Now()
 	pc.ResponseTime = responseTime
+}
+
+// String returns a string representation of the ProxyConfig
+func (pc *ProxyConfig) String() string {
+	pc.Mu.RLock()
+	defer pc.Mu.RUnlock()
+	return fmt.Sprintf("ProxyConfig{Address: %s, User: %s, Active: %v, LastCheck: %v, ResponseTime: %v}",
+		pc.Address, pc.Username, pc.IsActive, pc.LastCheck, pc.ResponseTime)
 }
 
 func (pc *ProxyConfig) MarkInactive(checkErr error) { 

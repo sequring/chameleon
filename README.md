@@ -1,5 +1,7 @@
 # Chameleon 🦎: Evolve Your Connections with a SOCKS5 SmartProxyChain
 
+> **Note**: Chameleon now uses YAML configuration by default for better readability and structure. The legacy JSON format is still supported for backward compatibility.
+
 Chameleon is more than just a SOCKS5 server; it's a **SmartProxyChain** manager that empowers you with unparalleled control and flexibility over your network traffic. By maintaining a dynamic pool of upstream SOCKS5 proxies, Chameleon intelligently routes client connections based on defined user permissions and proxy characteristics (tags), ensuring optimal performance, security, and reliability.
 
 ## Why Chameleon? Evolve Your Proxying Strategy!
@@ -81,7 +83,73 @@ Chameleon provides a robust, observable, and highly configurable solution for bu
 
 Chameleon's flexibility stems from its layered configuration. It's recommended to copy the example configuration files (`config.example.yml`, `proxies.example.json`, `users.example.json`) and adapt them to your needs.
 
-### 1. Main Configuration (`config.yml`)
+### Main Configuration (`config.yml`)
+
+Chameleon now uses YAML configuration by default for better readability and structure. The configuration is divided into logical sections for better organization.
+
+#### Configuration Structure
+
+```yaml
+# Server Configuration
+server:
+  socks_port: ":1080"  # SOCKS5 server port
+  admin_port: ":8081"   # Admin/management API port
+
+# Logging Configuration
+logging:
+  directory: "logs"
+  access_log_file: "access.log"
+  error_log_file: "error.log"
+  log_max_size_mb: 100
+  log_max_backups: 3
+  log_max_age_days: 28
+  log_compress: true
+
+# Upstream Proxies Configuration
+proxies:
+  config_file_path: "proxies.json"
+  check_interval_seconds: 60
+  check_timeout_seconds: 10
+  health_check_target: "www.google.com:443"
+
+# User Configuration
+users:
+  config_file_path: "users.json"
+  default_behavior_no_tags: "allow_default_tag_only"
+  default_proxy_tag: "general"
+
+# Webhook Configuration (Optional)
+webhook:
+  url: ""
+  post_timeout_seconds: 10
+
+# Admin API Security
+admin_api_reload_token: "your_secure_token_here"
+```
+
+#### Migrating from JSON to YAML
+
+If you're upgrading from an older version that used JSON configuration, you can use the following mapping:
+
+| Old JSON Key | New YAML Path | Notes |
+|--------------|---------------|-------|
+| `server_port` | `server.socks_port` | |
+| `proxies_file_path` | `proxies.config_file_path` | |
+| `proxy_check_interval` | `proxies.check_interval_seconds` | Now in seconds |
+| `proxy_check_timeout` | `proxies.check_timeout_seconds` | Now in seconds |
+| `health_check_target` | `proxies.health_check_target` | |
+| `prometheus_listen_addr` | `server.admin_port` | Now part of the server section |
+| `proxy_reload_token` | `admin_api_reload_token` | Moved to root level |
+
+#### Backward Compatibility
+
+Chameleon maintains backward compatibility with the old JSON format. If you have an existing `config.json`, you can continue using it by specifying the path when starting Chameleon:
+
+```bash
+./chameleon -config config.json
+```
+
+However, it's recommended to migrate to the new YAML format for better maintainability and access to new features.
 
 This YAML file is the heart of Chameleon, controlling server ports, logging behavior, paths to other configuration files, and crucial default policies for the SmartProxyChain. Create your `config.yml` based on `config.example.yml`.
 
@@ -145,18 +213,6 @@ Manage your SOCKS5 client credentials and their access rights in a JSON file (e.
 Validate your setup without starting services:
 ```bash
 ./chameleon_server -t -config /path/to/your/config.yml
-```
-
-## Dynamic Management API
-
-The admin server (default: `:8081`, see `config.yml`) provides endpoints for dynamic management. **All reload endpoints require the `X-Reload-Token` header (set in `config.yml`).**
-
-*   **`POST /reload-proxies`**: Reloads the proxies file.
-*   **`POST /reload-users`**: Reloads the users file.
-
-Example:
-```bash
-curl -X POST -H "X-Reload-Token: YOUR_CONFIGURED_TOKEN" http://localhost:8081/reload-proxies
 ```
 
 ## Monitoring Your SmartProxyChain

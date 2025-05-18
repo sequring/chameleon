@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,7 +20,6 @@ import (
 	"github.com/sequring/chameleon/metrics"
 	"github.com/sequring/chameleon/proxypool"
 	"github.com/sequring/chameleon/utils"
-	"github.com/sequring/chameleon/web"
 	"github.com/things-go/go-socks5"
 )
 
@@ -27,9 +27,10 @@ const AppVersion = "0.1.0"
 
 
 func main() {
-	configPath := flag.String("config", "config.json", "Path to the configuration file")
+	// Command line flags
+	configPath := flag.String("config", "config.yml", "Path to the configuration file (supports .yml and .json)")
 	testConfig := flag.Bool("t", false, "Test configuration and exit")
-	disableTextMetrics := flag.Bool("no-text-metrics", false, "Disable legacy text metrics output to log")
+	enableMetrics := flag.Bool("metrics", true, "Enable legacy text metrics output to log")
 
 	flag.Parse()
 
@@ -52,20 +53,37 @@ func main() {
 		os.Exit(1)
 	}
 
-	proxyDefsManager := config.NewProxyDefinitionsManager(appCfg.ProxiesFilePath, appCfg.ProxyReloadToken)
-	if err := proxyDefsManager.LoadDefinitions(); err != nil {
-		if !os.IsNotExist(err) { 
-			fmt.Fprintf(os.Stderr, "Error loading initial proxy definitions from '%s': %v\n", appCfg.ProxiesFilePath, err)
-			if *testConfig { 
-				fmt.Fprintln(os.Stderr, "Proxy definitions file test failed.")
-				os.Exit(1)
-			}
-			log.Printf("Error loading initial proxy definitions from '%s': %v. Proceeding with potentially no proxies.", appCfg.ProxiesFilePath, err)
-		} else {
-			log.Printf("Warning: Proxy definitions file '%s' not found. Starting with no proxies. Use API to load them or create the file.", appCfg.ProxiesFilePath)
-		}
+	// Get absolute path to the proxies file
+	abProxiesPath, err := filepath.Abs(appCfg.Proxies.ConfigFilePath)
+	if err != nil {
+		log.Printf("Warning: Could not get absolute path for proxies file: %v", err)
+	}
+	proxiesFilePath := abProxiesPath
+
+	log.Printf("Loading proxy definitions from: %s", proxiesFilePath)
+
+	// Check if file exists and is readable
+	if _, err := os.Stat(proxiesFilePath); os.IsNotExist(err) {
+		log.Printf("Warning: Proxy definitions file '%s' does not exist. Starting with no proxies.", proxiesFilePath)
+	} else if err != nil {
+		log.Printf("Warning: Cannot access proxy definitions file '%s': %v. Starting with no proxies.", proxiesFilePath, err)
 	}
 
+	proxyDefsManager := config.NewProxyDefinitionsManager(proxiesFilePath)
+	if err := proxyDefsManager.LoadDefinitions(); err != nil {
+		log.Printf("Error loading proxy definitions from '%s': %v", proxiesFilePath, err)
+		if *testConfig {
+			fmt.Fprintf(os.Stderr, "Proxy definitions file test failed: %v\n", err)
+			os.Exit(1)
+		}
+		log.Println("Proceeding with no proxies. Use the admin API to load proxies later.")
+	} else {
+		defs := proxyDefsManager.GetDefinitions()
+		log.Printf("Successfully loaded %d proxy definitions", len(defs))
+		for i, def := range defs {
+			log.Printf("  [%d] %s (User: %s, Tags: %v)", i+1, def.Address, def.Username, def.Tags)
+		}
+	}
 
 	if *testConfig {
 		fmt.Println("Configuration test successful (app config and initial proxies file if present).")
@@ -75,43 +93,29 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	utils.PrintBanner(AppVersion)
 
-	log.Printf("Using proxy definitions from: %s", appCfg.ProxiesFilePath)
-	if appCfg.ProxyReloadListenAddr != "" {
-		log.Printf("Proxy reload endpoint will be available at %s/reload-proxies", appCfg.ProxyReloadListenAddr)
-		if appCfg.ProxyReloadToken == "" {
-			log.Println("WARNING: Proxy reload endpoint is configured, but no proxy_reload_token is set. The endpoint will be INSECURE!")
-		}
+	// Load users from file
+	abUsersPath, err := filepath.Abs(appCfg.Users.ConfigFilePath)
+	if err != nil {
+		log.Printf("Warning: Could not get absolute path for users file: %v, using relative path", err)
+		abUsersPath = appCfg.Users.ConfigFilePath
 	}
 
-	config.DefaultProxyCheckInterval, err = time.ParseDuration(config.DefaultProxyCheckIntervalStr)
+	users, err := auth.LoadUsersFromFile(abUsersPath)
 	if err != nil {
-		log.Fatalf("Internal error: Invalid default proxy check interval string '%s': %v", config.DefaultProxyCheckIntervalStr, err)
+		log.Fatalf("Failed to load users from file: %v", err)
 	}
-	config.DefaultProxyCheckTimeout, err = time.ParseDuration(config.DefaultProxyCheckTimeoutStr)
-	if err != nil {
-		log.Fatalf("Internal error: Invalid default proxy check timeout string '%s': %v", config.DefaultProxyCheckTimeoutStr, err)
-	}
-	config.MetricsDisplayInterval, err = time.ParseDuration(config.DefaultMetricsIntervalStr)
-	if err != nil {
-		log.Fatalf("Internal error: Invalid default metrics interval string '%s': %v", config.DefaultMetricsIntervalStr, err)
-	}
+	auth.SetUsers(users)
+	log.Printf("Loaded %d users from %s", len(users), abUsersPath)
 
-	authService := auth.New()
-	for _, u := range appCfg.Users {
-		authService.AddClient(u.Username, u.Password, u.Allowed)
-		log.Printf("Loaded user: %s (Allowed: %v)", u.Username, u.Allowed)
-	}
-
-	proxyCheckInterval, _ := time.ParseDuration(appCfg.ProxyCheckInterval)
-	proxyCheckTimeout, _ := time.ParseDuration(appCfg.ProxyCheckTimeout)
-	currentMetricsInterval, _ := time.ParseDuration(appCfg.MetricsInterval)
+	proxyCheckInterval := time.Duration(appCfg.Proxies.CheckIntervalSecs) * time.Second
+	proxyCheckTimeout := time.Duration(appCfg.Proxies.CheckTimeoutSecs) * time.Second
 
 
 	pool := proxypool.New(
-		proxyDefsManager, 
+		proxyDefsManager,
 		proxyCheckInterval,
 		proxyCheckTimeout,
-		appCfg.HealthCheckTarget,
+		appCfg.Proxies.HealthCheckTarget,
 	)
 
 	oldMetricsSvc := &dialer.Metrics{}
@@ -120,58 +124,83 @@ func main() {
 	appCtx, appCancel := context.WithCancel(context.Background())
 	defer appCancel()
 
-	if appCfg.ProxyReloadListenAddr != "" {
-		web.StartProxyReloadHttpServer(appCfg.ProxyReloadListenAddr, proxyDefsManager)
-	}
+	// Define metrics interval
+	metricsUpdateInterval := 30 * time.Second
 
-	if appCfg.PrometheusListenAddr != "" {
-		promExporter := metrics.NewPrometheusExporter(pool, appCfg.PrometheusListenAddr)
-		promExporter.Start()
-
+	// Start Prometheus metrics server if enabled
+	if appCfg.Prometheus.Enabled {
+		log.Printf("Initializing Prometheus exporter on port %s", appCfg.Prometheus.Port)
+		promExporter := metrics.NewPrometheusExporter(pool, appCfg.Prometheus.Port)
+		
+		// Start Prometheus server
 		go func() {
-			ticker := time.NewTicker(currentMetricsInterval)
-			defer ticker.Stop()
-			log.Println("Prometheus proxy metrics updater started.")
-			for {
-				select {
-				case <-ticker.C:
-					promExporter.UpdateProxyMetrics()
-				case <-appCtx.Done():
-					log.Println("Prometheus proxy metrics updater stopping...")
-					return
+			log.Println("Starting Prometheus metrics server...")
+			if err := promExporter.Start(); err != nil {
+				log.Printf("Failed to start Prometheus metrics server: %v", err)
+				return
+			}
+			log.Printf("Prometheus metrics available at http://localhost%s/metrics", appCfg.Prometheus.Port)
+
+			// Start metrics updater
+			go func() {
+				ticker := time.NewTicker(metricsUpdateInterval)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						promExporter.UpdateProxyMetrics()
+					case <-appCtx.Done():
+						return
+					}
 				}
+			}()
+
+			// Wait for context cancellation
+			<-appCtx.Done()
+			
+			// Shutdown Prometheus server
+			if err := promExporter.Stop(); err != nil {
+				log.Printf("Error stopping Prometheus metrics server: %v", err)
 			}
 		}()
 	} else {
-		log.Println("Prometheus metrics endpoint is disabled (prometheus_listen_addr not set in config).")
+		log.Println("Prometheus metrics endpoint is disabled (prometheus.enabled is false)")
 	}
 
-	if !*disableTextMetrics {
-		go dialer.PrintMetrics(appCtx, currentMetricsInterval, pool, oldMetricsSvc)
-	} else {
-		log.Println("Legacy text metrics output is disabled by flag.")
+	// Start legacy metrics if enabled
+	if *enableMetrics {
+		go dialer.PrintMetrics(appCtx, metricsUpdateInterval, pool, oldMetricsSvc)
 	}
 
-	socksServerLogger := log.New(log.Writer(), "[SOCKS5_LIB] ", log.LstdFlags|log.Lmicroseconds)
+	// Create SOCKS5 server instance
 	server := socks5.NewServer(
 		socks5.WithDial(appDialer.Dial),
 		socks5.WithAuthMethods([]socks5.Authenticator{
-			socks5.UserPassAuthenticator{Credentials: authService},
+			socks5.UserPassAuthenticator{Credentials: auth.GetCredentialStore()},
 		}),
-		socks5.WithLogger(socks5.NewLogger(socksServerLogger)),
 	)
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	errChan := make(chan error, 1)
+	// Start SOCKS5 server
+	listenAddr := appCfg.Server.SocksPort
+	if listenAddr == "" {
+		listenAddr = ":1080"
+	}
+	
+	listener, err := net.Listen("tcp", listenAddr)
+	if err != nil {
+		log.Fatalf("Failed to start SOCKS5 server: %v", err)
+	}
+	defer listener.Close()
+	
+	// Start serving in a goroutine
 	go func() {
-		log.Printf("Starting SOCKS5 server on %s", appCfg.ServerPort)
-		if errSrv := server.ListenAndServe("tcp", appCfg.ServerPort); errSrv != nil && !errors.Is(errSrv, net.ErrClosed) {
-			log.Printf("SOCKS5 server ListenAndServe error: %v", errSrv)
+		if errSrv := server.Serve(listener); errSrv != nil && !errors.Is(errSrv, net.ErrClosed) {
 			errChan <- errSrv
 		}
-		log.Println("SOCKS5 server ListenAndServe goroutine finished.")
 		close(errChan)
 	}()
 
